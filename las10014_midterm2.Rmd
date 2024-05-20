@@ -1,0 +1,238 @@
+---
+title: "las10014_midterm"
+author: "Lauren Shelby"
+date: "2024-03-25"
+output: html_document
+---
+
+## Midterm Part 1 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Creating database according to the specified schema. 
+
+```{r}
+# Loading the 'Xspecies_Arabidopsis_Rice.txt' file into the environment that contains
+  # the orthology information 
+rice <- read.table("Xspecies_Arabidopsis_Rice.txt")
+
+# Assigning the correct column names to the data frame 
+colnames(rice) <- c("ArabidopsisGeneID", "Relationship" ,"RiceOrthologs")
+head(rice)
+```
+
+
+```{r}
+# Loading the 'AthBiomart.txt' file that contains the gene annotations into the environment 
+biomart <- read.delim("AthBiomart.txt")
+head(biomart)
+```
+
+
+```{r}
+# Loading the 'AthBIOGRID.txt' file that holds gene network interactions into the environment 
+biogrid <- read.delim("AthBIOGRID.txt")
+
+# Editing down to new data frame that just contains our desired cols 6, 7, 12, and 13 
+biogrid2 <- biogrid[,c("Systematic.Name.Interactor.A", "Systematic.Name.Interactor.B", "Experimental.System", "Experimental.System.Type")]
+head(biogrid2)
+```
+
+
+```{r}
+# Connecting to RSQlite
+library(RSQLite)
+
+drv<-dbDriver("SQLite")
+con<-dbConnect(drv, "las10014_midterm.sqlite")
+```
+
+Creating the 4 different tables to go into our database first in R
+
+```{r}
+# Creating the DataType table with 2 columns: DTID (primary key), and DataType
+DataType <- data.frame(matrix(c(1, 2, "Gene", "GO Term"), nrow = 2, ncol = 2))
+colnames(DataType) <- c("DTID", "DataType")
+DataType
+```
+
+```{r}
+# Creating the Data table with 3 columns: DID (primary key), DataName, and DTID_DataType (foreign key)
+
+# Creating the 'DataName' column that will store the 'Gene.stable.ID', 'GO.term.accession', and 'RiceOrthologs' information from the biomart and biogrid data frames 
+Data <- data.frame(c(unique(biomart$Gene.stable.ID), biomart$GO.term.accession, rice$RiceOrthologs)) #taking out repeated gene ID's 
+colnames(Data) <- "DataName"
+
+# Adding in the DID column that will give each DataName a value from 1 to the total number of DataNames
+Data$DID <- seq_len(nrow(Data))
+
+# Adding in DTID_DataType using a for loop and accessing the DataType table made above to use the values of DTID as the foreign key for this column 
+for (i in 1:nrow(Data)) {
+  if (startsWith(Data$DataName[i], "AT")) {
+    Data$DTID_DataType[i] <- 1
+  }
+  else if (startsWith(Data$DataName[i], "LOC")) {
+    Data$DTID_DataType[i] <- 1
+  }
+  else if (startsWith(Data$DataName[i], "GO")){
+    Data$DTID_DataType[i] <- 2
+  }
+}
+
+head(Data)
+tail(Data)
+```
+
+Creating DataAttributes Table by combining 3 separate data frames for the Gene, GO term, and Rice Ortholog data stored in the DataNames column of the Data table. The DataAttributes table has 4 columns: DAID (primary key), DataAttributeType, DID_Data (foreign key), and DataValue. 
+
+```{r}
+# Creating a data frame for the information with gene attributes from the biomart table 
+
+geneAttributes <- data.frame(unique(biomart$Gene.stable.ID), unique(biomart$Gene.name), unique(biomart$Gene.description))
+colnames(geneAttributes) <- c("DID_Data", "Gene Name", "Gene Description")
+
+# Adding column for species 
+geneAttributes$Species <- "Arabidopsis" 
+
+# Performing a normalization to create the columns we want in our final data frame 
+geneAttributes <- pivot_longer(geneAttributes, cols = c("Gene Name", "Gene Description", "Species"), names_to = "DataAttributeType", values_to = "DataValue")
+head(geneAttributes)
+
+# Extracting the Arabidopsis gene related rows from the Data table 
+geneData <- Data[startsWith(Data$DataName, "AT"),]
+head(goData)
+
+
+```
+
+```{r}
+# Creating a data frame for the GO term attributes from the biomart table 
+
+# Making a data frame with the GO term accession and it's corresponding GO term 
+goAttributes <- data.frame(biomart$GO.term.accession, biomart$GO.term.name)
+colnames(goAttributes) <- c("DID_Data", "DataValue") # The GO term accession will be replaced by the PK value from Data DID column 
+
+# Adding in a column for DataAttributeType 
+goAttributes$DataAttributeType <- "GO term name"
+
+# Extracting the GO term related rows from the Data table 
+goData <- Data[startsWith(Data$DataName, "GO"),]
+head(goData)
+
+
+
+goAttributes <- cbind(goAttributes, goData$DID)
+head(goAttributes)
+
+
+```
+
+
+```{r}
+# Creating a data frame for the Rice Ortholog attributes from the rice table 
+riceAttributes <- data.frame(rice$RiceOrthologs)
+colnames(goAttributes) <- "DID_Data" # To be replaced with PK from DID col in Data
+
+# Adding in a column for DataAttributeType 
+riceAttributes$DataAttributeType <- "Species"
+
+# Adding in a column for DataValue
+riceAttributes$DataValue <- "Rice"
+
+# Altering DID_Data so that it is a foreign key for the DID column of Data
+
+```
+
+
+```{r}
+for (i in 1:nrow(Data)) {
+  if (startsWith(Data$DataName[i], "GO")) {
+    for (j in 1:nrow(goAttributes)) {
+      if (Data$DataName[i] == goAttributes$DID[j]) {
+        goAttributes$DID[j] <- Data$DID[i]
+      }
+    }
+  }
+}
+head(goAttributes)
+
+
+# Creating the DataAttributes table with 4 columns: DAID (primary key), DataAttributeType, DID_Data (foreign key), and DataValue
+
+# Initializing an empty data frame with preliminary columns to fill in 
+DataAttributes <- data.frame(DataAttributeType = character(), DID_Data = integer(), DataValue = character(), stringsAsFactors = F)
+
+# Creating a for loop to parse through each row of Data and extract the attribute type and value to fill in the DataAttribute Type and DataValue columns 
+
+# Enter in "Arabidopsis" "Rice" and "GO term name" manually
+# For Gene, perform normalizations from the biomart table 
+
+counter <- 1 # Initializing a counter variable to keep the index of the DataAttributes table we're filling in 
+
+for (i in 1:nrow(Data)) {
+  if (startsWith(Data$DataName[i], "AT")) {
+    
+    
+    GeneAttributes <- data.frame(matrix(c(Data$DataName[i])))
+    counter <- counter + 3
+  }
+  else if (startsWith(Data$DataName[i], "LOC")) {
+    
+    counter <- counter + 1 
+  }
+  else if (startsWith(Data$DataName[i], "GO")) {
+    
+    counter <- counter + 1 
+  }
+}
+```
+
+
+```{r}
+# Creating the DataAttributes table with 4 columns: DAID (primary key), DataAttributeType, DID_Data (foreign key), and DataValue 
+
+# Creating variables that hold all of the attribute types 
+Attributes_Gene <- c("Gene.name", "Gene.description", "Species")
+Attributes_GO <- "GO.term.name"
+
+# Initializing an empty data frame with correct column names 
+DataAttributes <- data.frame(DAID = integer(), DataAttributeType = character(), DID_Data = integer(), DataValue = character(), stringsAsFactors = F)
+
+# Creating a for loop to fill in the DataAttributeType and DID_Data for each gene and GO term
+
+for (i in 1:nrow(Data)) { # Parsing through each row of Data to access each gene or GO term 
+  if (Data$DTID_DataType[i] == 1){ # If the row in Data is a Gene 
+    for (j in 0:length(Attributes_Gene)) {
+      DataAttributes$DataAttributeType[i+j] <- Attributes_Gene[j+1]
+      DataAttributes$DID_Data[i+j] <- Data$DID[i]
+    }
+  }
+  else if (Data$DTID_DataType[i] == 2) { # If the row in Data is a GO term
+    DataAttributes$DataAttributeType[i,2] <- Attributes_GO
+  }
+}
+
+# Creating a for loop to assign the value DataValue column in each column of DataAttributes
+
+# Creating a for loop to fill in the DataAttribute Type information for each GO term 
+
+
+colnames(DataAttributes) <- "DataAttributeType"
+
+# Creating a column DAID that holds the primary key for this table going 1 through nrow(DataAttributes)
+DataAttributes$DAID <- seq_len(nrow(DataAttributes))
+
+```
+
+
+```{r}
+# Creating the Relationship table with 5 columns: RID (primary key), Relationship, DID_Data_1 (foreign key), DID_Data_2 (foreign key), and RelValue
+
+```
+
+```{r}
+dbDisconnect(con)
+```
+

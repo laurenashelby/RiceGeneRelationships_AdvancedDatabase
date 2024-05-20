@@ -1,0 +1,400 @@
+---
+title: "las10014_midterm"
+author: "Lauren Shelby"
+date: "2024-03-28"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Midterm Part 1
+
+Creating database according to the specified schema. 
+
+```{r}
+# Loading the 'Xspecies_Arabidopsis_Rice.txt' file into the environment that contains
+  # the orthology information 
+rice <- read.table("Xspecies_Arabidopsis_Rice.txt")
+
+# Assigning the correct column names to the data frame 
+colnames(rice) <- c("ArabidopsisGeneID", "Relationship" ,"RiceOrthologs")
+head(rice)
+```
+
+```{r}
+# Loading the 'AthBiomart.txt' file that contains the gene annotations into the environment 
+biomart <- read.delim("AthBiomart.txt")
+head(biomart)
+```
+
+```{r}
+# Loading the 'AthBIOGRID.txt' file that holds gene network interactions into the environment 
+biogrid <- read.delim("AthBIOGRID.txt")
+
+# Editing down to new data frame that just contains our desired cols 6, 7, 12, and 13 
+biogrid2 <- biogrid[,c("Systematic.Name.Interactor.A", "Systematic.Name.Interactor.B", "Experimental.System", "Experimental.System.Type")]
+head(biogrid2)
+```
+
+
+Creating the 4 different tables to go into our database first in R
+
+```{r}
+# Creating the DataType table with 2 columns: DTID (primary key), and DataType
+DataType <- data.frame(matrix(c(1, 2, "Gene", "GO Term"), nrow = 2, ncol = 2))
+colnames(DataType) <- c("DTID", "DataType")
+DataType
+```
+
+```{r}
+# Creating the Data table with 3 columns: DID (primary key), DataName, and DTID_DataType (foreign key)
+
+# Creating the 'DataName' column that will store the 'Gene.stable.ID', 'GO.term.accession', and 'RiceOrthologs' information from the biomart and biogrid data frames 
+Data <- data.frame(c(unique(biomart$Gene.stable.ID), biomart$GO.term.accession, rice$RiceOrthologs)) #taking out repeated gene ID's 
+colnames(Data) <- "DataName"
+
+# Adding in the DID column that will give each DataName a value from 1 to the total number of DataNames
+Data$DID <- seq_len(nrow(Data))
+
+# Adding in DTID_DataType using a for loop and accessing the DataType table made above to use the values of DTID as the foreign key for this column 
+for (i in 1:nrow(Data)) {
+  if (startsWith(Data$DataName[i], "AT")) {
+    Data$DTID_DataType[i] <- 1
+  }
+  else if (startsWith(Data$DataName[i], "LOC")) {
+    Data$DTID_DataType[i] <- 1
+  }
+  else if (startsWith(Data$DataName[i], "GO")){
+    Data$DTID_DataType[i] <- 2
+  }
+}
+
+head(Data)
+tail(Data)
+```
+
+
+
+Creating DataAttributes Table by combining 3 separate data frames for the Gene, GO term, and Rice Ortholog data stored in the DataNames column of the Data table. The DataAttributes table has 4 columns: DAID (primary key), DataAttributeType, DID_Data (foreign key), and DataValue. 
+
+```{r}
+library(dplyr)
+library(tidyverse)
+
+# Extracting the Arabidopsis gene related rows from the Data table
+geneData <- Data[startsWith(Data$DataName, "AT"), 1:2]
+
+# Extracting the gene name and description values of the unique Gene ID's from biomart, then creating a column for the species value for all genes. Then adding in the corresponding DID from Data in a column DID_Data. Then performing a normalization with pivot_longer to put all of the attributes in one column, and all of the values in another 
+geneAttributes <- biomart %>%
+  distinct(Gene.stable.ID, .keep_all = T) %>%
+  select("Gene Name" = Gene.name, "Gene Description" = Gene.description) %>%
+  mutate(Species = "Arabidopsis") %>%
+  mutate(DID_Data = geneData$DID) %>% #Inserting the foreign key for DID col of Data
+  pivot_longer(cols = c("Gene Name", "Gene Description", "Species"), 
+               names_to = "DataAttributeType", values_to = "DataValue")
+
+head(geneAttributes)
+tail(geneAttributes)
+
+```
+
+
+
+```{r}
+# Creating a data frame for the GO term attributes from the biomart table 
+
+# Extracting the GO term related rows from the Data table 
+goData <- Data[27417:217583,] # Manually selecting GO terms by coordinates because it wouldn't select right amount any other way 
+
+# Making a data frame with the GO term accession and it's corresponding GO term 
+goAttributes <- biomart %>% 
+  select("DataValue" = GO.term.name) %>%
+  mutate(DataAttributeType = "Go term name") %>% 
+  mutate(DID_Data = goData$DID)
+
+head(goAttributes)
+tail(goAttributes)
+
+```
+
+```{r}
+# Creating a data frame for the Rice Ortholog attributes from the rice table 
+
+# Extracting the GO term related rows from the Data table 
+riceData <- Data[startsWith(Data$DataName, "LOC"), 1:2]
+
+# Making a data frame with the GO term accession and it's corresponding GO term 
+riceAttributes <- data.frame(riceData$DID)
+colnames(riceAttributes) <- "DID_Data"
+riceAttributes$DataValue <- "Rice"
+riceAttributes$DataAttributeType <- "Species"
+
+head(riceAttributes)
+tail(riceAttributes)
+```
+
+```{r}
+# Combining all three tables into one table called DataAttributes 
+
+DataAttributes <- bind_rows(geneAttributes, goAttributes, riceAttributes)
+DataAttributes$DAID <- seq_len(nrow(DataAttributes))
+head(DataAttributes)
+tail(DataAttributes)
+```
+
+Creating the Relationships table in 3 separate tables then combining 
+
+```{r}
+# Creating a table containing the GOterm2Gene relationship from the biomart table 
+
+# Creating initial table with the Gene ID's from Data (to be replaced by their DID), the DID of each GO term, and the GOterm2Gene relationship
+gotogene <- data.frame(biomart$Gene.stable.ID) %>% 
+  mutate(DID_Data_1 = goData$DID) %>% 
+  mutate(RelValue = "GOterm2Gene") 
+
+# Creating an index column to make sure the DID_Data_2 stays in the right order after the mutation 
+gotogene$index = seq_len(nrow(gotogene)) 
+
+#Changing column name to what it's called in geneData for merge 
+colnames(gotogene)[names(gotogene) == "biomart.Gene.stable.ID"] <- "DataName"
+
+#Performing a merge of the arabidopsis gene ID numbers in geneData to the names present in the GO term gene interactions stored in gotogene 
+gotogene <- merge(gotogene, geneData, all.x = TRUE)
+
+#Changing column name of DID to DID_Data_Gene 
+colnames(gotogene)[names(gotogene) == "DID"] <- "DID_Data_2"
+
+# Reorder columns to ensure the "DID_Data_2" column stays in its original order
+gotogene <- gotogene[order(gotogene$index), ]
+
+# Getting rid of DataName column 
+gotogene <- subset(gotogene, select = -c(DataName, index))
+
+head(gotogene)
+tail(gotogene)
+```
+
+```{r}
+# Creating a table with the GeneOrthologs relationship 
+
+# Creating an initial table with the arabidopsis gene ID's from rice table 
+orthologs <- data.frame(rice$ArabidopsisGeneID)
+
+# Adding in the corresponding DID of the rice orthologs for each arabidopsis gene 
+orthologs <- cbind(orthologs, riceData$DID)
+colnames(orthologs) <- c("DataName", "DID_Data_1")
+
+# Creating relationship column 
+orthologs$RelValue <- "GeneOrthologs"
+
+# Merging the arabidopsis gene ID's with the names in the orthologs table 
+orthologs <- merge(orthologs, geneData, all.x = TRUE)
+
+# Getting rid of the DataName column 
+orthologs <- subset(orthologs, select = -c(DataName))
+
+colnames(orthologs)[names(orthologs)=="DID"] <- "DID_Data_2"
+
+head(orthologs)
+tail(orthologs)
+```
+
+```{r}
+# Creating a table with the Interaction relationships 
+
+# Two separate tables with information from biogrid to match up to the corresponding Gene ID's 
+genetable1 <- data.frame(biogrid2[1:56198,1]) # wouldn't grab all of them if not specifying coords
+colnames(genetable1) <- "DataName"
+genetable2 <- data.frame(biogrid2$Systematic.Name.Interactor.B)
+colnames(genetable2) <- "DataName"
+
+# Adding an index column to preserve the original order
+genetable1$index <- seq_len(nrow(genetable1))
+genetable2$index <- seq_len(nrow(genetable2))
+
+# Merging both tables with geneData to get the corresponding Gene ID
+genetable1 <- merge(genetable1, geneData, all.x = TRUE)
+genetable2 <- merge(genetable2, geneData, all.x = TRUE)
+
+# Reordering the data frames based on the index column
+genetable1 <- genetable1[order(genetable1$index), ]
+genetable2 <- genetable2[order(genetable2$index), ]
+
+# Removing the index and DataName columns 
+genetable1 <- subset(genetable1, select = -c(index, DataName))
+genetable2 <- subset(genetable2, select = -c(index, DataName))
+
+# Changing the two column names 
+colnames(genetable1) <- "DID_Data_1"
+colnames(genetable2) <- "DID_Data_2"
+
+# Combining the two individual tables 
+interactionData <- cbind(genetable1, genetable2)
+interactionData$RelValue <- "InteractionRelationship"
+
+head(interactionData)
+tail(interactionData)
+
+```
+```{r}
+# Combining all the tables into one Relationships table 
+
+Relationships <- bind_rows(gotogene, orthologs, interactionData)
+Relationships$RID <- seq_len(nrow(Relationships))
+head(Relationships)
+tail(Relationships)
+```
+
+
+Writing the 3 tables to SQL 
+
+```{r}
+# Connecting to RSQlite
+library(RSQLite)
+
+drv<-dbDriver("SQLite")
+con<-dbConnect(drv, "las10014_midterm.sqlite")
+```
+
+```{r}
+# Checking if table exists, if it does dropping the table 
+if (dbExistsTable(con, "DataType")) {
+  dbSendQuery(con, "drop table DataType")
+}
+
+# Writing the DataType table 
+dbSendQuery(con, "CREATE TABLE DataType (DTID INTEGER PRIMARY KEY NOT NULL, DataType VARCHAR)")
+
+insert_DT <- dbSendQuery(con, "insert into DataType (DTID, DataType)
+                          values ($DTID, $DataType)")
+
+dbBind(insert_DT, DataType)
+```
+
+```{r}
+# Checking if table exists, if it does dropping the table 
+if (dbExistsTable(con, "Data")) {
+  dbSendQuery(con, "drop table Data")
+}
+
+# Writing the Data table 
+dbSendQuery(con, "CREATE TABLE Data (DID INTEGER PRIMARY KEY NOT NULL, DataName VARCHAR, 
+DTID_DataType INTEGER, FOREIGN KEY (DTID_DataType) REFERENCES DataType(DTID))")
+
+insert_D <- dbSendQuery(con, "insert into Data (DID, DataName, DTID_DataType)
+                          values ($DID, $DataName, $DTID_DataType)")
+
+dbBind(insert_D, Data)
+```
+
+```{r}
+# Checking if table exists, if it does dropping the table 
+if (dbExistsTable(con, "DataAttributes")) {
+  dbSendQuery(con, "drop table DataAttributes")
+}
+
+# Writing to the DataAttributes table 
+dbSendQuery(con, "CREATE TABLE DataAttributes (DAID INTEGER PRIMARY KEY NOT NULL, DID_Data INTEGER, 
+DataAttributeType VARCHAR, DataValue VARCHAR, FOREIGN KEY (DID_Data) REFERENCES Data(DID))")
+
+insert_DA <- dbSendQuery(con, "insert into DataAttributes (DAID, DID_Data, DataAttributeType, DataValue)
+                          values ($DAID, $DID_Data, $DataAttributeType, $DataValue)")
+
+dbBind(insert_DA, DataAttributes)
+```
+
+```{r}
+# Checking if table exists, if it does dropping the table 
+if (dbExistsTable(con, "Relationships")) {
+  dbSendQuery(con, "drop table Relationships")
+}
+
+# Writing to the Relationships table 
+dbSendQuery(con, "CREATE TABLE Relationships (RID INTEGER PRIMARY KEY NOT NULL, DID_Data_1 INTEGER, 
+DID_Data_2 INTEGER, RelValue VARCHAR, FOREIGN KEY (DID_Data_1) REFERENCES Data(DID), FOREIGN KEY(DID_Data_2) REFERENCES Data(DID))")
+
+insert_R <- dbSendQuery(con, "insert into Relationships (RID, DID_Data_1, DID_Data_2, RelValue)
+                          values ($RID, $DID_Data_1, $DID_Data_2, $RelValue)")
+
+dbBind(insert_R, Relationships)
+```
+
+## Part 2: getOrthologs() function 
+
+
+```{r}
+# Creating a function getOrthologs() where the input is a GO term and the output is a data frame of Arabidopsis genes and their Rice gene orthologs that are associated with the GO term 
+
+getOrthologs <- function(goterm, con) {
+  # Getting the DID associated with the selected goterm from the DataAttributes table 
+  gotermDIDQuery <- dbGetQuery(con, paste("SELECT * FROM DataAttributes WHERE DataValue = '", goterm,"'", sep = ""))
+  
+  # Extracting gene DIDs associated with each GO term 
+  goDIDs <- gotermDIDQuery$DID_Data
+  
+  # Constructing the comma-separated string of gene DIDs
+  goDIDs_str <- paste(goDIDs, collapse = ", ")
+  
+  # Querying the Relationships table for the gene DIDs associated with each GO term 
+  geneIDsQuery <- dbGetQuery(con, paste("SELECT * FROM Relationships WHERE DID_Data_1 IN (", goDIDs_str, ") AND RelValue = 'GOterm2Gene'", sep = ""))
+  
+  # Extracting gene DIDs associated with the gene names attached to the GO term 
+  geneDIDs <- geneIDsQuery$DID_Data_2
+  
+  # Constructing comma-separated string of gene DIDs 
+  geneDIDs_str <- paste(geneDIDs, collapse = ", ")
+  
+   # Now using the gene DIDs to get the corresponding rice orthologs from Relationship
+  orthologsQuery <- dbGetQuery(con, paste("SELECT * FROM Relationships WHERE DID_Data_2 IN (", geneDIDs_str, ") AND RelValue = 'GeneOrthologs' ", sep = ""))
+  
+  # Separating out the DIDs for the corresponding genes
+  orthologGenes <- orthologsQuery$DID_Data_2
+  orthologGenes_str <- paste(orthologGenes, collapse = ", ")
+  
+  # Querying the Data table for the gene names 
+  orthologGeneQuery <- dbGetQuery(con, paste("SELECT DataName, DID FROM Data WHERE DID IN (", orthologGenes_str, ")", sep = ""))
+  orthologGenes <- data.frame(orthologGenes)
+  colnames(orthologGenes) <- "DID"
+  orthologGenes$index <- seq_len(nrow(orthologGenes))
+  
+  # Merging the DataNames with the original table of gene DIDs that correspond to the orthologs
+  orthologGeneNames <- merge(orthologGenes, orthologGeneQuery)
+  orthologGeneNames <- orthologGeneNames[order(orthologGeneNames$index), ]
+  
+  # Separating out the DIDs for the rice orthologs from the orthologsQuery
+  orthologRice <- orthologsQuery$DID_Data_1
+  orthologRice_str <- paste(orthologRice, collapse = ", ")
+  
+  # Querying the Data table for the ortholog names 
+  orthologRiceQuery <- dbGetQuery(con, paste("SELECT DataName, DID FROM Data WHERE DID IN (", orthologRice_str, ")", sep = ""))
+  orthologRice <- data.frame(orthologRice)
+  colnames(orthologRice) <- "DID"
+  orthologRice$index <- seq_len(nrow(orthologRice))
+  
+  #Merging the Datanames with the original table of rice ortholog DIDs
+  orthologRiceNames <- merge(orthologRice, orthologRiceQuery)
+  orthologRiceNames <- orthologRiceNames[order(orthologRiceNames$index), ]
+  
+  # Combining the separate columns of Gene names to corresponding Rice ortholog
+  Orthologs <- cbind(data.frame(orthologGeneNames$DataName, orthologRiceNames$DataName))
+  colnames(Orthologs) <- c("Gene Name", "Rice Ortholog")
+  
+  return(Orthologs)
+}
+
+# Test the function
+head(getOrthologs("binding", con))
+head(getOrthologs("membrane", con))
+
+```
+
+
+```{r}
+dbDisconnect(con)
+```
+
+
